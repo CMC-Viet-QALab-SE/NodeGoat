@@ -134,7 +134,7 @@ jobs:
           path: semgrep.sarif
       - name: Gate on ERROR only (Warning/Info are report-only)
         run: |
-          ERRORS=$(jq '[.runs[].results[] | select(.level=="error")] | length' semgrep.sarif)
+          ERRORS=$(jq '[.runs[] as $r | ($r.tool.driver.rules // [] | map({key:.id,value:.defaultConfiguration.level}) | from_entries) as $lv | $r.results[] | select($lv[.ruleId]=="error")] | length' semgrep.sarif)
           echo "Semgrep ERROR findings: $ERRORS  (warning/info report-only)"
           # Phase 2 — uncomment the next line to block on ERROR-level findings:
           # [ "$ERRORS" -eq 0 ] || { echo "Blocking: ERROR-level findings present"; exit 1; }
@@ -180,9 +180,9 @@ jobs:
 
           # --- SAST ---
           if [ -f "$SARIF" ]; then
-            ERR=$(jq '[.runs[].results[]|select(.level=="error")]|length' "$SARIF")
-            WARN=$(jq '[.runs[].results[]|select(.level=="warning")]|length' "$SARIF")
-            NOTE=$(jq '[.runs[].results[]|select(.level=="note")]|length' "$SARIF")
+            ERR=$(jq '[.runs[] as $r | ($r.tool.driver.rules // [] | map({key:.id,value:.defaultConfiguration.level}) | from_entries) as $lv | $r.results[]|select($lv[.ruleId]=="error")]|length' "$SARIF")
+            WARN=$(jq '[.runs[] as $r | ($r.tool.driver.rules // [] | map({key:.id,value:.defaultConfiguration.level}) | from_entries) as $lv | $r.results[]|select($lv[.ruleId]=="warning")]|length' "$SARIF")
+            NOTE=$(jq '[.runs[] as $r | ($r.tool.driver.rules // [] | map({key:.id,value:.defaultConfiguration.level}) | from_entries) as $lv | $r.results[]|select($lv[.ruleId]=="note")]|length' "$SARIF")
           else
             ERR=0; WARN=0; NOTE=0
           fi
@@ -209,7 +209,7 @@ jobs:
             if [ "$ERR" -gt 0 ]; then
               echo "<details><summary>SAST — $ERR ERROR-level finding(s)</summary>"
               echo ""
-              jq -r '.runs[].results[] | select(.level=="error") | "- **\(.ruleId)** — `\(.locations[0].physicalLocation.artifactLocation.uri):\(.locations[0].physicalLocation.region.startLine)`"' "$SARIF" | head -50
+              jq -r '.runs[] as $r | ($r.tool.driver.rules // [] | map({key:.id,value:.defaultConfiguration.level}) | from_entries) as $lv | $r.results[] | select($lv[.ruleId]=="error") | "- **\(.ruleId)** — `\(.locations[0].physicalLocation.artifactLocation.uri):\(.locations[0].physicalLocation.region.startLine)`"' "$SARIF" | head -50
               echo ""
               echo "</details>"
             fi
