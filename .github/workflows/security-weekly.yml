@@ -33,11 +33,13 @@ jobs:
       - name: detect-secrets — full-tree report (cross-check)
         run: |
           pip install detect-secrets==1.5.0
-          git ls-files -z | xargs -0 detect-secrets scan --baseline .secrets.baseline > detect-secrets-report.json || true
+          # Full scan of the working tree → single valid JSON report (no plaintext, only hashes).
+          # Exclude the baseline file so its hash strings aren't re-flagged as secrets.
+          detect-secrets scan --exclude-files '\.secrets\.baseline$' > detect-secrets-report.json || true
         continue-on-error: true
 
       - name: Trivy — full scan + generate SBOM (CycloneDX)
-        uses: aquasecurity/trivy-action@0.29.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: fs
           scan-ref: .
