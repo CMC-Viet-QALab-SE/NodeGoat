@@ -191,9 +191,6 @@ jobs:
           SARIF=artifacts/semgrep-sarif/semgrep.sarif
           # Base URL for clickable file links in the comment (points at the PR head commit).
           BLOB="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/blob/${HEAD_SHA}"
-          # DEMO ONLY: hardcoded DefectDojo engagement (RFC example domain, not a real instance).
-          DD_URL="https://defectdojo.example.com/engagement/4242"
-          DD_ENG_NAME="NodeGoat PR#${{ github.event.pull_request.number }} $(date -u +%Y-%m-%d)"
 
           # --- Secret (type + location only from detect-secrets — never the value) ---
           SECNEW=artifacts/secret-report/secret-new.json
@@ -232,7 +229,6 @@ jobs:
             echo "| Secret | TruffleHog + detect-secrets | $SEC_ROW |"
             echo "| SCA | Trivy | $SCA_ROW |"
             echo "| SAST | Semgrep | $SAST_ROW |"
-            echo "| DefectDojo | Import (High/Critical) | [Engagement #4242]($DD_URL) |"
             echo ""
             if [ "${SEC_N:-0}" -gt 0 ]; then
               echo "<details><summary>Secret — $SEC_N new finding(s)</summary>"
@@ -255,12 +251,6 @@ jobs:
               echo ""
               echo "</details>"
             fi
-            echo ""
-            echo "### 📊 DefectDojo"
-            echo "High/Critical findings imported into DefectDojo (Staging)."
-            echo ""
-            echo "- **Engagement:** [$DD_ENG_NAME]($DD_URL)"
-            echo "- **Imported:** ${SEC_N:-0} secret · ${SCA_N:-0} SCA (Critical/High) · ${ERR:-0} SAST (ERROR)"
             echo ""
             echo "<sub>Warning/Info (SAST) and Low/Medium (SCA) are reported in the job logs, not blocking. Merge gating is enforced by branch protection, not by this comment.</sub>"
           } > report.md
