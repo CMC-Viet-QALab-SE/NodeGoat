@@ -1,0 +1,8 @@
+# Place this file at the REPO ROOT as: .trivyignore
+# Waivers use Trivy's native expiration (`exp:`) so they auto-expire and get re-reviewed.
+# After the exp date Trivy stops ignoring the CVE and it surfaces again.
+# Format:  <CVE-ID> exp:YYYY-MM-DD   # reason | owner: @who | approver: @sec-lead
+# Reviewed by security during weekly triage — not edited by developers alone.
+
+# Example (delete before use):
+# CVE-2023-12345 exp:2026-10-01   # not reachable in our usage | owner: @team | approver: @sec-lead

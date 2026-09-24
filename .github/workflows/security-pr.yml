@@ -1,0 +1,226 @@
+name: security-pr
+
+on:
+  pull_request:
+    branches: [master]
+  # merge_group: {}   # uncomment if the repo uses a merge queue (required checks must also run here)
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  # ---- Secret scan (blocking) ---------------------------------------------
+  secret-scan:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: TruffleHog (verified secrets in PR diff)
+        uses: trufflesecurity/trufflehog@v3.88.0
+        with:
+          base: ${{ github.event.pull_request.base.sha }}
+          head: ${{ github.event.pull_request.head.sha }}
+          # --json so the optional DefectDojo add-on can read findings from this run's logs
+          # (no re-scan). The action still gates on findings regardless of output format.
+          extra_args: --results=verified,unknown --json
+      - name: detect-secrets (cross-check + location-only report)
+        run: |
+          pip install detect-secrets==1.5.0
+          # Location-only report for the DefectDojo job: type + file + line, NO plaintext
+          # (detect-secrets stores a hash, never the secret value). Written before the gate
+          # so the artifact exists even if the gate then fails.
+          detect-secrets scan > secret-scan.json
+          # Gate: exits non-zero on any secret NOT in the baseline.
+          git ls-files -z | xargs -0 detect-secrets-hook --baseline .secrets.baseline
+      - name: Upload secret report (location only — no values)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: secret-report
+          path: secret-scan.json
+          if-no-files-found: ignore
+
+  # ---- SCA: only runs when dependency manifests change; report all, gate C/H
+  # The job ALWAYS runs (so the required check always reports a status); the Trivy
+  # steps are skipped — and the check passes — when no manifest/lockfile changed.
+  sca:
+    name: SCA scan
+    runs-on: ubuntu-latest
+    outputs:
+      ran: ${{ steps.changed.outputs.run }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect dependency-manifest changes
+        id: changed
+        run: |
+          PATTERN='(^|/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|package\.json|composer\.lock|composer\.json|Cargo\.lock|Cargo\.toml|pubspec\.lock|pubspec\.yaml|Gemfile\.lock|Gemfile)$'
+          if git diff --name-only "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}" | grep -Eq "$PATTERN"; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "Dependency manifests changed — running SCA."
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "No dependency manifest changed — SCA skipped (check passes)."
+          fi
+
+      - name: Trivy — report ALL severities (non-blocking)
+        if: steps.changed.outputs.run == 'true'
+        uses: aquasecurity/trivy-action@0.29.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+          exit-code: 0                  # always report-only
+          format: table
+
+      - name: Trivy — machine-readable output (for the PR comment)
+        if: steps.changed.outputs.run == 'true'
+        uses: aquasecurity/trivy-action@0.29.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: 0
+          format: json
+          output: trivy-sca.json
+          trivyignores: .trivyignore,.trivy-baseline.txt
+
+      - name: Trivy — gate on Critical/High (diff-aware baseline)
+        if: steps.changed.outputs.run == 'true'
+        uses: aquasecurity/trivy-action@0.29.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true          # block only vulns that HAVE a fix
+          exit-code: 0                  # Phase 2 → 1
+          # .trivy-baseline.txt = pre-existing vulns (legacy debt); .trivyignore = curated waivers.
+          trivyignores: .trivyignore,.trivy-baseline.txt
+
+      - name: Upload SCA report (evidence + PR comment input)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sca-report
+          path: trivy-sca.json
+          if-no-files-found: ignore
+
+  # ---- SAST: report ALL severities; gate only on ERROR --------------------
+  sast:
+    name: SAST
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0               # semgrep ci needs the base ref to be diff-aware
+      - name: Install Semgrep
+        run: pip install semgrep       # pin an exact version
+      - name: Semgrep — report ALL severities (diff-aware, SARIF)
+        run: semgrep ci --config p/default --config p/owasp-top-ten --config p/javascript --config p/secrets --sarif --output semgrep.sarif || true
+      - name: Upload Semgrep SARIF (evidence + PR comment input)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: semgrep-sarif
+          path: semgrep.sarif
+      - name: Gate on ERROR only (Warning/Info are report-only)
+        run: |
+          ERRORS=$(jq '[.runs[].results[] | select(.level=="error")] | length' semgrep.sarif)
+          echo "Semgrep ERROR findings: $ERRORS  (warning/info report-only)"
+          # Phase 2 — uncomment the next line to block on ERROR-level findings:
+          # [ "$ERRORS" -eq 0 ] || { echo "Blocking: ERROR-level findings present"; exit 1; }
+
+  # ---- Report: aggregate the three layers into ONE sticky PR comment ------
+  report:
+    name: PR security report
+    needs: [secret-scan, sca, sast]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write          # needed to post/update the PR comment
+    env:
+      SECRET_RESULT: ${{ needs.secret-scan.result }}
+      SCA_RAN: ${{ needs.sca.outputs.ran }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Download scan artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+        continue-on-error: true
+
+      - name: Build report
+        run: |
+          SCA=artifacts/sca-report/trivy-sca.json
+          SARIF=artifacts/semgrep-sarif/semgrep.sarif
+
+          # --- Secret (status only — never echo secrets into a public comment) ---
+          if [ "$SECRET_RESULT" = "success" ]; then SEC_ROW="✅ No new secrets"; else SEC_ROW="❌ Potential secret(s) — see the Secret scan job log"; fi
+
+          # --- SCA ---
+          if [ "$SCA_RAN" != "true" ]; then
+            SCA_ROW="⏭️ Skipped (no dependency change)"; SCA_N=0
+          elif [ -f "$SCA" ]; then
+            SCA_N=$(jq '[.Results[]?.Vulnerabilities[]?] | length' "$SCA")
+            if [ "$SCA_N" -gt 0 ]; then SCA_ROW="⚠️ $SCA_N new fixable Critical/High"; else SCA_ROW="✅ No new Critical/High"; fi
+          else
+            SCA_ROW="✅ No new Critical/High"; SCA_N=0
+          fi
+
+          # --- SAST ---
+          if [ -f "$SARIF" ]; then
+            ERR=$(jq '[.runs[].results[]|select(.level=="error")]|length' "$SARIF")
+            WARN=$(jq '[.runs[].results[]|select(.level=="warning")]|length' "$SARIF")
+            NOTE=$(jq '[.runs[].results[]|select(.level=="note")]|length' "$SARIF")
+          else
+            ERR=0; WARN=0; NOTE=0
+          fi
+          if [ "$ERR" -gt 0 ]; then SAST_ROW="❌ $ERR ERROR (+$WARN warning, $NOTE info — report only)"; else SAST_ROW="✅ 0 ERROR ($WARN warning, $NOTE info — report only)"; fi
+
+          {
+            echo "## 🔐 Security scan report"
+            echo ""
+            echo "Commit \`${GITHUB_SHA:0:7}\` · [full logs & artifacts]($RUN_URL)"
+            echo ""
+            echo "| Layer | Tool | Result |"
+            echo "|---|---|---|"
+            echo "| Secret | TruffleHog + detect-secrets | $SEC_ROW |"
+            echo "| SCA | Trivy | $SCA_ROW |"
+            echo "| SAST | Semgrep | $SAST_ROW |"
+            echo ""
+            if [ "${SCA_N:-0}" -gt 0 ]; then
+              echo "<details><summary>SCA — $SCA_N new fixable Critical/High</summary>"
+              echo ""
+              jq -r '.Results[]? as $r | $r.Vulnerabilities[]? | "- **\(.VulnerabilityID)** (\(.Severity)) `\(.PkgName)@\(.InstalledVersion)` → fixed in \(.FixedVersion // "n/a")"' "$SCA" | head -50
+              echo ""
+              echo "</details>"
+            fi
+            if [ "$ERR" -gt 0 ]; then
+              echo "<details><summary>SAST — $ERR ERROR-level finding(s)</summary>"
+              echo ""
+              jq -r '.runs[].results[] | select(.level=="error") | "- **\(.ruleId)** — `\(.locations[0].physicalLocation.artifactLocation.uri):\(.locations[0].physicalLocation.region.startLine)`"' "$SARIF" | head -50
+              echo ""
+              echo "</details>"
+            fi
+            echo ""
+            echo "<sub>Warning/Info (SAST) and Low/Medium (SCA) are reported in the job logs, not blocking. Merge gating is enforced by branch protection, not by this comment.</sub>"
+          } > report.md
+
+      - name: Post/update sticky PR comment
+        if: github.event.pull_request.head.repo.fork == false
+        run: |
+          PR=${{ github.event.pull_request.number }}
+          # --edit-last updates the previous bot comment; if none exists yet, create one.
+          gh pr comment "$PR" --edit-last --body-file report.md 2>/dev/null \
+            || gh pr comment "$PR" --body-file report.md

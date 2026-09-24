@@ -1,0 +1,31 @@
+# Place this file at the REPO ROOT as: .pre-commit-config.yaml
+# Managed by the pre-commit framework (https://pre-commit.com)
+# Runs two complementary secret detectors on the staged diff before each commit.
+
+repos:
+  # --- Secret detector 1: entropy + keyword detection with a reviewed baseline ---
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.5.0
+    hooks:
+      - id: detect-secrets
+        args: ["--baseline", ".secrets.baseline"]
+        # Only NEW secrets block; anything already in .secrets.baseline is ignored.
+
+  # --- Secret detector 2: verified-credential detection on the staged diff ---
+  - repo: https://github.com/trufflesecurity/trufflehog
+    rev: v3.88.0                 # pin to the latest release tag
+    hooks:
+      - id: trufflehog
+        name: trufflehog (verified secrets)
+        entry: trufflehog git file://. --since-commit HEAD --results=verified,unknown --fail
+        language: system          # requires the trufflehog binary on PATH
+        pass_filenames: false
+
+  # --- Optional hygiene hooks (safe defaults, remove if unwanted) ---
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-merge-conflict
+      - id: detect-private-key
+      - id: end-of-file-fixer
+      - id: trailing-whitespace

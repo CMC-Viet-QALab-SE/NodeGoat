@@ -1,0 +1,4 @@
+# SCA baseline — pre-existing vulnerabilities accepted as legacy debt.
+# EMPTY placeholder: until you generate it, the PR SCA scan behaves like a full scan.
+# Generate with scripts/gen-trivy-baseline.sh (or the sca-baseline workflow), then commit.
+# PR scans ignore entries here; only NEW fixable Critical/High fail.

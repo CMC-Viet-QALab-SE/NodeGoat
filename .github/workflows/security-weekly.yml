@@ -1,0 +1,62 @@
+# Place this file at: .github/workflows/security-weekly.yml
+# Weekly deep scan: full history / full tree / full ruleset. Produces reports + SBOM.
+
+name: security-weekly
+
+on:
+  schedule:
+    # 00:15 Monday, Asia/Tokyo (JST, UTC+9) = 15:15 Sunday UTC.
+    # Deliberately NOT on the hour (:00): GitHub runs a huge number of jobs scheduled at the
+    # top of the hour, so :00 runs get queued/delayed and can collide with other weekly tasks
+    # scheduled at the same time. Adjust the minute/hour below if you need a different slot.
+    - cron: "15 15 * * 0"          # 00:15 Monday, Asia/Tokyo (JST, UTC+9)
+  workflow_dispatch: {}            # allow manual "Run workflow" from the Actions tab
+
+permissions:
+  contents: read
+
+jobs:
+  deep-scan:
+    name: Weekly deep scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: TruffleHog — FULL git history
+        uses: trufflesecurity/trufflehog@v3.88.0
+        with:
+          extra_args: --results=verified,unknown --json
+        continue-on-error: true    # report-only: weekly scan reports, does not fail the build
+
+      - name: detect-secrets — full-tree report (cross-check)
+        run: |
+          pip install detect-secrets==1.5.0
+          git ls-files -z | xargs -0 detect-secrets scan --baseline .secrets.baseline > detect-secrets-report.json || true
+        continue-on-error: true
+
+      - name: Trivy — full scan + generate SBOM (CycloneDX)
+        uses: aquasecurity/trivy-action@0.29.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,misconfig
+          format: cyclonedx
+          output: sbom-${{ github.sha }}.json
+
+      - name: Semgrep — full ruleset (SARIF)
+        run: |
+          docker run --rm -v "$PWD:/src" semgrep/semgrep \
+            semgrep scan --config auto --sarif --output /src/semgrep-full.sarif
+        continue-on-error: true
+
+      - name: Upload reports as build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: weekly-security-reports-${{ github.run_number }}
+          path: |
+            sbom-*.json
+            semgrep-full.sarif
+            detect-secrets-report.json
+          retention-days: 90
