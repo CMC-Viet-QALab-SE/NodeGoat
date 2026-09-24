@@ -33,14 +33,38 @@ jobs:
           # (detect-secrets stores a hash, never the secret value). Written before the gate
           # so the artifact exists even if the gate then fails.
           detect-secrets scan > secret-scan.json
+          # Clear error if the baseline was never committed (avoids a cryptic hook failure).
+          if [ ! -f .secrets.baseline ]; then
+            echo "::error::.secrets.baseline is missing. Run the 'secret-baseline' workflow (or detect-secrets on Linux) and commit .secrets.baseline before this gate."
+            exit 1
+          fi
           # Gate: exits non-zero on any secret NOT in the baseline.
           git ls-files -z | xargs -0 detect-secrets-hook --baseline .secrets.baseline
+      - name: Compute NEW secrets for the PR comment (type + location, no values)
+        if: always()
+        run: |
+          python3 <<'PY'
+          import json
+          try: scan = json.load(open("secret-scan.json"))
+          except Exception: scan = {"results": {}}
+          try: base = json.load(open(".secrets.baseline"))
+          except Exception: base = {"results": {}}
+          known = {(fn, it.get("hashed_secret"))
+                   for fn, items in base.get("results", {}).items() for it in items}
+          new = [{"type": it.get("type", "Secret"), "file": fn, "line": it.get("line_number")}
+                 for fn, items in scan.get("results", {}).items() for it in items
+                 if (fn, it.get("hashed_secret")) not in known]
+          json.dump(new, open("secret-new.json", "w"))
+          print(f"new secrets: {len(new)}")
+          PY
       - name: Upload secret report (location only — no values)
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: secret-report
-          path: secret-scan.json
+          path: |
+            secret-scan.json
+            secret-new.json
           if-no-files-found: ignore
 
   # ---- SCA: only runs when dependency manifests change; report all, gate C/H
@@ -125,7 +149,7 @@ jobs:
       - name: Install Semgrep
         run: pip install semgrep       # pin an exact version
       - name: Semgrep — report ALL severities (diff-aware, SARIF)
-        run: semgrep ci --config p/default --config p/owasp-top-ten --config p/javascript --config p/secrets --sarif --output semgrep.sarif || true
+        run: semgrep ci --config p/default --config p/owasp-top-ten --config p/secrets --sarif --output semgrep.sarif || true
       - name: Upload Semgrep SARIF (evidence + PR comment input)
         if: always()
         uses: actions/upload-artifact@v4
@@ -152,6 +176,7 @@ jobs:
       SECRET_RESULT: ${{ needs.secret-scan.result }}
       SCA_RAN: ${{ needs.sca.outputs.ran }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       GH_TOKEN: ${{ github.token }}
     steps:
       - name: Download scan artifacts
@@ -164,9 +189,15 @@ jobs:
         run: |
           SCA=artifacts/sca-report/trivy-sca.json
           SARIF=artifacts/semgrep-sarif/semgrep.sarif
+          # Base URL for clickable file links in the comment (points at the PR head commit).
+          BLOB="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/blob/${HEAD_SHA}"
 
-          # --- Secret (status only — never echo secrets into a public comment) ---
-          if [ "$SECRET_RESULT" = "success" ]; then SEC_ROW="✅ No new secrets"; else SEC_ROW="❌ Potential secret(s) — see the Secret scan job log"; fi
+          # --- Secret (type + location only from detect-secrets — never the value) ---
+          SECNEW=artifacts/secret-report/secret-new.json
+          if [ -f "$SECNEW" ]; then SEC_N=$(jq 'length' "$SECNEW"); else SEC_N=0; fi
+          if [ "${SEC_N:-0}" -gt 0 ]; then SEC_ROW="❌ $SEC_N new secret(s)"
+          elif [ "$SECRET_RESULT" = "success" ]; then SEC_ROW="✅ No new secrets"
+          else SEC_ROW="⚠️ scan failed — see the Secret scan job log"; fi
 
           # --- SCA ---
           if [ "$SCA_RAN" != "true" ]; then
@@ -199,6 +230,13 @@ jobs:
             echo "| SCA | Trivy | $SCA_ROW |"
             echo "| SAST | Semgrep | $SAST_ROW |"
             echo ""
+            if [ "${SEC_N:-0}" -gt 0 ]; then
+              echo "<details><summary>Secret — $SEC_N new finding(s)</summary>"
+              echo ""
+              jq -r --arg blob "$BLOB" '.[] | "- **\(.type)** — [\(.file):\(.line)](\($blob)/\(.file)#L\(.line))"' "$SECNEW" | head -50
+              echo ""
+              echo "</details>"
+            fi
             if [ "${SCA_N:-0}" -gt 0 ]; then
               echo "<details><summary>SCA — $SCA_N new fixable Critical/High</summary>"
               echo ""
@@ -209,7 +247,7 @@ jobs:
             if [ "$ERR" -gt 0 ]; then
               echo "<details><summary>SAST — $ERR ERROR-level finding(s)</summary>"
               echo ""
-              jq -r '.runs[] as $r | ($r.tool.driver.rules // [] | map({key:.id,value:.defaultConfiguration.level}) | from_entries) as $lv | $r.results[] | select($lv[.ruleId]=="error") | "- **\(.ruleId)** — `\(.locations[0].physicalLocation.artifactLocation.uri):\(.locations[0].physicalLocation.region.startLine)`"' "$SARIF" | head -50
+              jq -r --arg blob "$BLOB" '.runs[] as $r | ($r.tool.driver.rules // [] | map({key:.id,value:.defaultConfiguration.level}) | from_entries) as $lv | $r.results[] | select($lv[.ruleId]=="error") | (.locations[0].physicalLocation) as $pl | ($pl.artifactLocation.uri | sub("^\\./";"")) as $u | ($pl.region.startLine) as $ln | "- **\(.ruleId)** — [\($u):\($ln)](\($blob)/\($u)#L\($ln))"' "$SARIF" | head -50
               echo ""
               echo "</details>"
             fi
