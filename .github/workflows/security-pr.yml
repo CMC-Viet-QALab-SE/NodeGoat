@@ -218,7 +218,7 @@ jobs:
           } > report.md
 
       - name: Post/update sticky PR comment
-        if: github.event.pull_request.head.repo.fork == false
+        if: github.event.pull_request.head.repo.full_name == github.repository
         run: |
           PR=${{ github.event.pull_request.number }}
           # --edit-last updates the previous bot comment; if none exists yet, create one.
