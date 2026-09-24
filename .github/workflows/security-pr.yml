@@ -222,5 +222,5 @@ jobs:
         run: |
           PR=${{ github.event.pull_request.number }}
           # --edit-last updates the previous bot comment; if none exists yet, create one.
-          gh pr comment "$PR" --edit-last --body-file report.md 2>/dev/null \
-            || gh pr comment "$PR" --body-file report.md
+          gh pr comment "$PR" -R "$GITHUB_REPOSITORY" --edit-last --body-file report.md 2>/dev/null \
+            || gh pr comment "$PR" -R "$GITHUB_REPOSITORY" --body-file report.md
