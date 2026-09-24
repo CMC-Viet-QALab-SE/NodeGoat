@@ -70,7 +70,7 @@ jobs:
 
       - name: Trivy — report ALL severities (non-blocking)
         if: steps.changed.outputs.run == 'true'
-        uses: aquasecurity/trivy-action@0.29.0
+        uses: aquasecurity/trivy-action@0.36.0
         with:
           scan-type: fs
           scan-ref: .
@@ -81,7 +81,7 @@ jobs:
 
       - name: Trivy — machine-readable output (for the PR comment)
         if: steps.changed.outputs.run == 'true'
-        uses: aquasecurity/trivy-action@0.29.0
+        uses: aquasecurity/trivy-action@0.36.0
         with:
           scan-type: fs
           scan-ref: .
@@ -95,7 +95,7 @@ jobs:
 
       - name: Trivy — gate on Critical/High (diff-aware baseline)
         if: steps.changed.outputs.run == 'true'
-        uses: aquasecurity/trivy-action@0.29.0
+        uses: aquasecurity/trivy-action@0.36.0
         with:
           scan-type: fs
           scan-ref: .
